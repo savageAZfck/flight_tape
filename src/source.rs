@@ -15,10 +15,17 @@ use std::path::{Path, PathBuf};
 /// Follows an append-only JSONL file with a persisted byte offset.
 /// Each new line yields `(kind, body)` frames. Survives truncation
 /// (log rotation) by resetting to offset 0 when the file shrinks.
+///
+/// At-least-once delivery: `drain` only stages an offset advance; `commit`
+/// persists it after the consumer has durably recorded the frames. A crash
+/// between drain and commit re-delivers the window — duplicate frames are
+/// preferable to dropped evidence (replays can dedupe by seq/ts).
 pub struct LedgerTailer {
     path: PathBuf,
     offset_path: PathBuf,
     offset: u64,
+    /// Bytes consumed by drain() but not yet committed.
+    pending: u64,
     /// Map ledger event `type` values to frame `kind`. Identity by default.
     /// `None` → frame kind = the event's `type` field.
     pub kind_map: KindMap,
@@ -36,11 +43,13 @@ impl LedgerTailer {
             path,
             offset_path,
             offset,
+            pending: 0,
             kind_map: None,
         })
     }
 
-    /// Drain all new lines into `(kind, body)` pairs. Persists offset.
+    /// Drain all new lines into `(kind, body)` pairs. Stages the offset
+    /// advance — call `commit` after the frames are durably recorded.
     /// Returns frames in arrival order.
     pub fn drain(&mut self) -> Result<Vec<(String, Value)>> {
         let mut out = Vec::new();
@@ -91,12 +100,23 @@ impl LedgerTailer {
             out.push((kind, body));
         }
 
-        self.offset += advanced;
+        self.pending += advanced;
         let _ = consumed;
+        Ok(out)
+    }
+
+    /// Persist the staged offset. Call only after drained frames are durably
+    /// recorded — a crash before commit re-delivers them on next drain.
+    pub fn commit(&mut self) -> Result<()> {
+        if self.pending == 0 {
+            return Ok(());
+        }
+        self.offset += self.pending;
+        self.pending = 0;
         let tmp = self.offset_path.with_extension("tmp");
         fs::write(&tmp, self.offset.to_string())?;
         fs::rename(&tmp, &self.offset_path)?;
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -127,13 +147,21 @@ fn strip_keys(v: &Value, skip: &str) -> Value {
 /// Drains a drop-stream file: writers append `{kind, body}` lines and the
 /// daemon consumes them, truncating the file after ingestion. Fire-and-forget
 /// for the writer — no daemon required to be alive.
+///
+/// At-least-once: `drain` reads but does not truncate; `commit` clears the
+/// file after the frames are durably recorded.
 pub struct IntentIngester {
     path: PathBuf,
+    /// Lines consumed by drain() but not yet committed.
+    pending: bool,
 }
 
 impl IntentIngester {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            pending: false,
+        }
     }
 
     /// Consume all pending intent lines; returns `(kind, body)` pairs.
@@ -156,12 +184,28 @@ impl IntentIngester {
             let (kind, body) = extract_kind_body(&v);
             out.push((kind, body));
         }
-        // Truncate — consumed lines don't re-ingest.
-        OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(&self.path)?;
+        if !out.is_empty() {
+            self.pending = true;
+        }
         Ok(out)
+    }
+
+    /// Clear consumed intents. Call only after the frames are durably
+    /// recorded — a crash before commit re-delivers them on next drain.
+    /// Writers appending between drain and commit race the truncate; the
+    /// window is one poll cycle and acceptable for a best-effort drop file.
+    pub fn commit(&mut self) -> Result<()> {
+        if !self.pending {
+            return Ok(());
+        }
+        self.pending = false;
+        if self.path.exists() {
+            OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&self.path)?;
+        }
+        Ok(())
     }
 
     /// Writer-side helper: append one intent line (used by embedders and the

@@ -185,7 +185,9 @@ fn intent_ingest() {
     assert_eq!(drained.len(), 2);
     assert_eq!(drained[0].0, "intent");
     assert_eq!(drained[0].1["tool"], "write_file");
-    // File truncated after drain
+    // File cleared only after commit — at-least-once delivery
+    assert_eq!(ing.drain().unwrap().len(), 2);
+    ing.commit().unwrap();
     assert_eq!(ing.drain().unwrap().len(), 0);
 }
 

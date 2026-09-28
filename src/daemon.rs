@@ -83,25 +83,26 @@ impl Daemon {
             }
         }
 
-        // Drain ledger sources into a pending list (avoids borrowing self
-        // twice when a freeze fires mid-drain)
-        let mut ledger_frames = Vec::new();
-        for tailer in self.tailers.iter_mut() {
-            ledger_frames.extend(tailer.drain()?);
-        }
-        let mut intent_frames = self.intents.drain()?;
-
-        for (kind, body) in ledger_frames {
-            self.ring.record(&kind, "ledger", body.clone())?;
-            if let Some(t) = trigger::matches_freeze(&self.config.triggers, &kind, &body) {
-                if let Some(b) = self.try_freeze(t.to_freeze())? {
-                    bundles.push(b);
+        // Drain each source, record its frames, then commit its offset —
+        // at-least-once: a crash mid-batch re-delivers rather than drops.
+        for i in 0..self.tailers.len() {
+            let ledger_frames = self.tailers[i].drain()?;
+            for (kind, body) in ledger_frames {
+                self.ring.record(&kind, "ledger", body.clone())?;
+                if let Some(t) = trigger::matches_freeze(&self.config.triggers, &kind, &body) {
+                    if let Some(b) = self.try_freeze(t.to_freeze())? {
+                        bundles.push(b);
+                    }
                 }
             }
+            self.tailers[i].commit()?;
         }
-        for (kind, body) in intent_frames.drain(..) {
+
+        let intent_frames = self.intents.drain()?;
+        for (kind, body) in intent_frames {
             self.ring.record(&kind, "intent", body)?;
         }
+        self.intents.commit()?;
 
         // Crash detection — alive→dead transition
         if let Some(proc_name) = &self.config.triggers.watch_process {
