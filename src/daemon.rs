@@ -36,8 +36,8 @@ pub struct Daemon {
     intents: IntentIngester,
     /// Liveness of the watched process on the previous poll.
     subject_was_alive: bool,
-    /// Stop flag (SIGTERM/SIGINT handler sets it).
-    stop: Option<&'static AtomicBool>,
+    /// Stop flag (signal handler or supervisor sets it).
+    stop: Option<std::sync::Arc<AtomicBool>>,
 }
 
 impl Daemon {
@@ -64,9 +64,9 @@ impl Daemon {
         })
     }
 
-    /// Install a stop flag (e.g. `static STOP: AtomicBool` flipped by a
-    /// signal handler or `ctrlc` crate in the CLI).
-    pub fn with_stop(mut self, stop: &'static AtomicBool) -> Self {
+    /// Install a stop flag — flipped by a signal handler (signal-hook),
+    /// supervisor, or embedder thread.
+    pub fn with_stop(mut self, stop: std::sync::Arc<AtomicBool>) -> Self {
         self.stop = Some(stop);
         self
     }
@@ -160,7 +160,7 @@ impl Daemon {
     pub fn run(&mut self) -> Result<()> {
         loop {
             self.poll_once()?;
-            if let Some(stop) = self.stop {
+            if let Some(stop) = &self.stop {
                 if stop.load(Ordering::SeqCst) {
                     return Ok(());
                 }

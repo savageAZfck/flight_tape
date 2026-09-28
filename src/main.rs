@@ -19,9 +19,8 @@ use flight_tape::trigger::TriggerConfig;
 use flight_tape::verify;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-static STOP: AtomicBool = AtomicBool::new(false);
 
 #[derive(Parser)]
 #[command(
@@ -130,6 +129,12 @@ enum Cmd {
     },
 }
 
+/// Bare-CLI stop flag — never set; SIGTERM/SIGINT kill the process directly.
+/// Embedders needing graceful shutdown install their own flag via with_stop.
+fn stop_flag() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
 fn parse_state_roots(specs: &[String]) -> Vec<StateRoot> {
     specs
         .iter()
@@ -159,11 +164,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_frames,
             max_bytes,
         } => {
-            // SIGTERM/SIGINT → stop flag
-            let _ = std::thread::spawn(|| loop {
-                std::thread::sleep(Duration::from_millis(500));
-                // crude signal check via flag file as portable fallback
-            });
             let cfg = DaemonConfig {
                 intent_path: intent.unwrap_or_else(|| dir.join(flight_tape::INTENT_STREAM)),
                 tape_dir: dir,
@@ -182,7 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     watch_process: watch,
                 },
             };
-            let mut d = Daemon::open(cfg)?.with_stop(&STOP);
+            let mut d = Daemon::open(cfg)?.with_stop(stop_flag());
             d.run()?;
         }
         Cmd::Record {
