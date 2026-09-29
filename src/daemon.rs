@@ -99,7 +99,13 @@ impl Daemon {
 
         let intent_frames = self.intents.drain()?;
         for (kind, body) in intent_frames {
-            self.ring.record(&kind, "intent", body)?;
+            self.ring.record(&kind, "intent", body.clone())?;
+            // kill_switch can arrive via the intent stream too
+            if let Some(t) = trigger::matches_freeze(&self.config.triggers, &kind, &body) {
+                if let Some(b) = self.try_freeze(t.to_freeze())? {
+                    bundles.push(b);
+                }
+            }
         }
         self.intents.commit()?;
 
