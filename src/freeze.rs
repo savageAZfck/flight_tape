@@ -1,5 +1,6 @@
 //! Freeze — seal the current ring window into a signed incident bundle.
 
+use crate::frame::Frame;
 use crate::ring::Ring;
 use crate::sign;
 use crate::{Error, Result};
@@ -84,10 +85,14 @@ pub fn freeze(
     state_roots: &[StateRoot],
     prior_incidents: Vec<String>,
 ) -> Result<IncidentBundle> {
-    let frames = ring.frames()?;
-    if frames.is_empty() {
+    let raw = ring.raw_lines()?;
+    if raw.is_empty() {
         return Err(Error::Missing("ring is empty — nothing to freeze".into()));
     }
+    let frames: Vec<Frame> = raw
+        .iter()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
     let first = frames.first().unwrap();
     let last = frames.last().unwrap();
 
@@ -100,13 +105,15 @@ pub fn freeze(
         .join(format!("{}-{}", stamp, last.seq));
     fs::create_dir_all(&bundle_dir)?;
 
-    // frames.jsonl — verbatim copy of the window
+    // frames.jsonl — verbatim copy of the window. Raw lines, not reserialized
+    // frames: the hash commits to the stored bytes, and re-serializing can
+    // change float/escape forms across serde_json feature sets.
     let frames_path = bundle_dir.join("frames.jsonl");
     {
         let mut w = fs::File::create(&frames_path)?;
         use std::io::Write;
-        for f in &frames {
-            w.write_all(serde_json::to_vec(f)?.as_slice())?;
+        for l in &raw {
+            w.write_all(l.as_bytes())?;
             w.write_all(b"\n")?;
         }
         w.sync_data()?;
@@ -206,7 +213,13 @@ pub fn list_incidents(dir: &Path) -> Vec<String> {
     let mut out: Vec<String> = fs::read_dir(&incidents)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
-                .filter(|e| e.path().is_dir())
+                .filter(|e| {
+                    // Only complete bundles — a dir without a signed manifest
+                    // is a freeze still in flight, not an incident.
+                    e.path().is_dir()
+                        && e.path().join("manifest.json").exists()
+                        && e.path().join("manifest.sig").exists()
+                })
                 .map(|e| e.file_name().to_string_lossy().to_string())
                 .collect()
         })

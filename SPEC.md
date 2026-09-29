@@ -16,7 +16,7 @@ One JSON object per line in `ring.jsonl` and bundle `frames.jsonl`:
 - `src` — provenance (`ledger`, `intent`, `cli`, `daemon`)
 - `body` — redacted JSON payload
 - `hash` — `SHA-256("FT1:" || prev_hash_raw || seq:u64le || ts:u64le || kind_len:u32le || kind || src_len:u32le || src || body_json_len:u64le || body_json)`
-- `body_json` is compact `serde_json` serialization (no whitespace, key order preserved)
+- `body_json` is the *stored* `body` value's byte span — verifiers MUST hash the raw substring from the line (between `,"body":` and the terminal `,"prev_hash":"<64hex>","hash":…`), never a re-serialized `Value`. Float shortest-form and escape choices can differ across serde_json feature sets (e.g. after workspace feature unification), so the commitment is to bytes-on-disk. Writers serialize the body with compact `serde_json` (no whitespace).
 - genesis `prev_hash` = `SHA-256("flight_tape-genesis-v1")`
 
 ## Ring bounds

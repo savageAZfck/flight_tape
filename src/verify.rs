@@ -77,37 +77,46 @@ pub fn verify_bundle(bundle_dir: &Path) -> Result<VerifyReport> {
                 break;
             }
         };
-        // First frame in a bundle links to prior context we can't see —
-        // verify linkage from frame 2 onward, but always check self-hash.
+        // Hash the stored body bytes verbatim — the commitment is to the
+        // bytes on disk, not to any re-serialization of the parsed Value.
+        let canon = match crate::frame::raw_body(line) {
+            Some(c) => c,
+            None => {
+                problems.push(format!("frame {} body not extractable", frame.seq));
+                chain_ok = false;
+                break;
+            }
+        };
+        let self_ok = {
+            let prev = decode_hash(&frame.prev_hash).unwrap_or(tip);
+            hex::encode(Frame::compute_hash(
+                &prev,
+                frame.seq,
+                frame.ts,
+                &frame.kind,
+                &frame.src,
+                canon.as_bytes(),
+            )) == frame.hash
+        };
+        if !self_ok {
+            problems.push(format!("frame {} self-hash mismatch", frame.seq));
+            chain_ok = false;
+        }
         if count == 0 {
             first_seq = frame.seq;
-            let self_ok = {
-                let prev = decode_hash(&frame.prev_hash).unwrap_or(tip);
-                hex::encode(Frame::compute_hash(
-                    &prev,
-                    frame.seq,
-                    frame.ts,
-                    &frame.kind,
-                    &frame.src,
-                    &frame.body,
-                )) == frame.hash
-            };
-            if !self_ok {
-                problems.push(format!("frame {} self-hash mismatch", frame.seq));
-                chain_ok = false;
-            }
-            tip = decode_hash(&frame.hash).unwrap_or(tip);
         } else {
+            // First frame in a bundle links to prior context we can't see —
+            // verify linkage from frame 2 onward (self-hash checked above).
             if frame.seq != last_seq + 1 {
                 problems.push(format!("seq gap at {}", frame.seq));
                 chain_ok = false;
             }
-            if !frame.verify(&tip) {
+            if decode_hash(&frame.prev_hash) != Some(tip) {
                 problems.push(format!("chain broken at seq {}", frame.seq));
                 chain_ok = false;
             }
-            tip = decode_hash(&frame.hash).unwrap_or(tip);
         }
+        tip = decode_hash(&frame.hash).unwrap_or(tip);
         last_seq = frame.seq;
         count += 1;
     }

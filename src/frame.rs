@@ -32,15 +32,18 @@ pub struct Frame {
 
 impl Frame {
     /// Compute the hash this frame should carry given the chain tip.
+    /// `body_bytes` are the canonical serialized body — the hash commits to
+    /// those exact bytes, so verifiers must hash the *stored* substring, not
+    /// a re-serialized Value (float shortest-form can differ across
+    /// serde_json feature sets after workspace feature unification).
     pub fn compute_hash(
         prev: &[u8; HASH_SIZE],
         seq: u64,
         ts: u64,
         kind: &str,
         src: &str,
-        body: &serde_json::Value,
+        body_bytes: &[u8],
     ) -> [u8; HASH_SIZE] {
-        let canon = serde_json::to_vec(body).unwrap_or_else(|_| b"null".to_vec());
         let mut h = Sha256::new();
         h.update(DOMAIN);
         h.update(prev);
@@ -50,8 +53,8 @@ impl Frame {
         h.update(kind.as_bytes());
         h.update((src.len() as u32).to_le_bytes());
         h.update(src.as_bytes());
-        h.update((canon.len() as u64).to_le_bytes());
-        h.update(&canon);
+        h.update((body_bytes.len() as u64).to_le_bytes());
+        h.update(body_bytes);
         let out = h.finalize();
         let mut d = [0u8; HASH_SIZE];
         d.copy_from_slice(&out);
@@ -68,10 +71,49 @@ impl Frame {
         if prev != *expected_prev {
             return false;
         }
-        let computed =
-            Self::compute_hash(&prev, self.seq, self.ts, &self.kind, &self.src, &self.body);
+        let canon = serde_json::to_vec(&self.body).unwrap_or_else(|_| b"null".to_vec());
+        let computed = Self::compute_hash(&prev, self.seq, self.ts, &self.kind, &self.src, &canon);
         hex::encode(computed) == self.hash
     }
+
+    /// Byte-exact verification: extract the raw `body` substring from the
+    /// stored line and hash it verbatim. This is what the writer committed
+    /// to — immune to serializer differences across builds.
+    /// Returns None if the line doesn't match the frame layout.
+    pub fn verify_line(line: &str, expected_prev: &[u8; HASH_SIZE]) -> Option<bool> {
+        let frame: Frame = serde_json::from_str(line.trim_end()).ok()?;
+        let prev = decode_hash(&frame.prev_hash)?;
+        if prev != *expected_prev {
+            return Some(false);
+        }
+        let canon = raw_body(line)?;
+        let computed = Self::compute_hash(
+            &prev,
+            frame.seq,
+            frame.ts,
+            &frame.kind,
+            &frame.src,
+            canon.as_bytes(),
+        );
+        Some(hex::encode(computed) == frame.hash)
+    }
+}
+
+/// Extract the raw serialized `body` field from a stored frame line.
+/// Frame layout is fixed: `{"v":…,"seq":…,"ts":…,"kind":…,"src":…,"body":<RAW>,
+/// "prev_hash":"<64 hex>","hash":"<64 hex>"}`. The tail anchor is the *last*
+/// `,"prev_hash":"` so lookalike text inside the body can't truncate it early.
+pub fn raw_body(line: &str) -> Option<&str> {
+    let start = line.find(",\"body\":")? + ",\"body\":".len();
+    let tail = line.rfind(",\"prev_hash\":\"")?;
+    if tail <= start {
+        return None;
+    }
+    let body = &line[start..tail];
+    if serde_json::from_str::<serde_json::Value>(body).is_err() {
+        return None;
+    }
+    Some(body)
 }
 
 pub fn decode_hash(s: &str) -> Option<[u8; HASH_SIZE]> {

@@ -113,7 +113,25 @@ impl Ring {
                 Ok(f) => f,
                 Err(_) => break, // torn write — truncate here
             };
-            if frame.seq != self.next_seq || !frame.verify(&self.last_hash) {
+            // Hash the stored body bytes verbatim — re-serializing a parsed
+            // Value can change float shortest-form across serde_json builds.
+            let line_ok = match crate::frame::raw_body(trimmed) {
+                Some(canon) => {
+                    let prev = crate::frame::decode_hash(&frame.prev_hash)
+                        .map(|p| p == self.last_hash)
+                        .unwrap_or(false);
+                    prev && hex::encode(Frame::compute_hash(
+                        &self.last_hash,
+                        frame.seq,
+                        frame.ts,
+                        &frame.kind,
+                        &frame.src,
+                        canon.as_bytes(),
+                    )) == frame.hash
+                }
+                None => false,
+            };
+            if frame.seq != self.next_seq || !line_ok {
                 break; // corrupt tail — truncate to last good frame
             }
             self.last_hash = decode_hash(&frame.hash).unwrap();
@@ -151,7 +169,8 @@ impl Ring {
             .unwrap_or_default()
             .as_secs();
         let seq = self.next_seq;
-        let hash = Frame::compute_hash(&self.last_hash, seq, ts, kind, src, &body);
+        let canon = serde_json::to_vec(&body)?;
+        let hash = Frame::compute_hash(&self.last_hash, seq, ts, kind, src, &canon);
         let frame = Frame {
             v: crate::frame::FORMAT_VERSION,
             seq,
@@ -229,6 +248,23 @@ impl Ring {
             }
         }
         Ok(())
+    }
+
+    /// Raw stored lines (oldest → newest) — the exact bytes the hash chain
+    /// commits to. Freeze copies these verbatim; reserializing parsed frames
+    /// can alter float/escape forms and break verification.
+    pub fn raw_lines(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if !self.path.exists() {
+            return Ok(out);
+        }
+        for line in BufReader::new(File::open(&self.path)?).lines() {
+            let line = line?;
+            if !line.trim().is_empty() {
+                out.push(line);
+            }
+        }
+        Ok(out)
     }
 
     /// Read all currently retained frames (oldest → newest).

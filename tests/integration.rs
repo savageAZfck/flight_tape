@@ -112,6 +112,34 @@ fn tampered_bundle_fails() {
 }
 
 #[test]
+fn raw_literal_float_body_verifies() {
+    // The hash commits to the stored body *bytes*: a frame whose body keeps a
+    // long float literal (`...5471`, 18 digits — parses to the f64 whose
+    // shortest form is `...547`) must verify even though re-serializing the
+    // parsed Value would print different digits. This is what broke bundles
+    // when freeze reserialized frames under a different serde_json build.
+    use flight_tape::frame::{genesis_hash, raw_body, Frame};
+    let prev = genesis_hash();
+    let canon = br#"{"persona":"Cali","text":"4","tier":"main","tps":0.092411413788795471}"#;
+    let hash = hex::encode(Frame::compute_hash(
+        &prev, 1, 100, "response", "ledger", canon,
+    ));
+    let line = format!(
+        "{{\"v\":1,\"seq\":1,\"ts\":100,\"kind\":\"response\",\"src\":\"ledger\",\"body\":{},\"prev_hash\":\"{}\",\"hash\":\"{}\"}}",
+        std::str::from_utf8(canon).unwrap(),
+        hex::encode(prev),
+        hash
+    );
+    assert_eq!(
+        raw_body(&line).unwrap(),
+        std::str::from_utf8(canon).unwrap()
+    );
+    let frame: Frame = serde_json::from_str(&line).unwrap();
+    assert_eq!(frame.verify(&prev), false); // Value-path would mis-verify
+    assert_eq!(Frame::verify_line(&line, &prev), Some(true)); // byte-path verifies
+}
+
+#[test]
 fn ring_compaction_keeps_chain() {
     let tmp = TempDir::new().unwrap();
     let cfg = RingConfig {
