@@ -5,7 +5,7 @@
 use crate::freeze::{self, FreezeTrigger, IncidentBundle, StateRoot};
 use crate::ring::{Ring, RingConfig};
 use crate::source::{IntentIngester, LedgerTailer};
-use crate::trigger::{self, Trigger, TriggerConfig};
+use crate::trigger::{self, TriggerConfig};
 use crate::Result;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,8 +34,8 @@ pub struct Daemon {
     config: DaemonConfig,
     tailers: Vec<LedgerTailer>,
     intents: IntentIngester,
-    /// Liveness of the watched process on the previous poll.
-    subject_was_alive: bool,
+    /// Pid of the watched process on the previous poll (None = absent).
+    subject_pid: Option<u32>,
     /// Stop flag (signal handler or supervisor sets it).
     stop: Option<std::sync::Arc<AtomicBool>>,
 }
@@ -48,18 +48,17 @@ impl Daemon {
             tailers.push(LedgerTailer::new(src.clone(), &config.tape_dir)?);
         }
         let intents = IntentIngester::new(config.intent_path.clone());
-        let subject_was_alive = config
+        let subject_pid = config
             .triggers
             .watch_process
             .as_deref()
-            .map(trigger::process_alive)
-            .unwrap_or(true);
+            .and_then(trigger::process_pid);
         Ok(Self {
             ring,
             config,
             tailers,
             intents,
-            subject_was_alive,
+            subject_pid,
             stop: None,
         })
     }
@@ -104,20 +103,15 @@ impl Daemon {
         }
         self.intents.commit()?;
 
-        // Crash detection — alive→dead transition
+        // Crash detection — watched pid vanished or was replaced
         if let Some(proc_name) = &self.config.triggers.watch_process {
-            let alive = trigger::process_alive(proc_name);
-            if self.subject_was_alive && !alive {
-                if let Some(b) = self.try_freeze(
-                    Trigger::Crash {
-                        process: proc_name.clone(),
-                    }
-                    .to_freeze(),
-                )? {
+            let cur = trigger::process_pid(proc_name);
+            if let Some(t) = trigger::pid_transition(self.subject_pid, cur, proc_name) {
+                if let Some(b) = self.try_freeze(t.to_freeze())? {
                     bundles.push(b);
                 }
             }
-            self.subject_was_alive = alive;
+            self.subject_pid = cur;
         }
 
         self.ring.write_head()?;

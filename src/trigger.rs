@@ -108,18 +108,40 @@ pub fn check_freeze_file(tape_dir: &Path) -> Option<Trigger> {
     })
 }
 
-/// Is `name` running? macOS/Linux: scan /proc or pgrep.
+/// Current pid of `name` — watched by *identity*, not just liveness, so a
+/// crash-and-fast-respawn (inside one poll interval) still registers as an
+/// instance change. macOS/Linux: pgrep.
 #[cfg(target_family = "unix")]
-pub fn process_alive(name: &str) -> bool {
+pub fn process_pid(name: &str) -> Option<u32> {
     std::process::Command::new("pgrep")
         .arg("-x")
         .arg(name)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .and_then(|l| l.trim().parse().ok())
+        })
 }
 
 #[cfg(not(target_family = "unix"))]
-pub fn process_alive(_name: &str) -> bool {
-    true // can't check — assume alive, never crash-trigger
+pub fn process_pid(_name: &str) -> Option<u32> {
+    None // can't check — never crash-trigger
+}
+
+/// Evaluate a watched-process transition. `prev`/`cur` are the observed pids
+/// (None = absent) on consecutive polls.
+pub fn pid_transition(prev: Option<u32>, cur: Option<u32>, name: &str) -> Option<Trigger> {
+    match (prev, cur) {
+        (Some(_), None) => Some(Trigger::Crash {
+            process: name.into(),
+        }),
+        (Some(p), Some(q)) if p != q => Some(Trigger::Crash {
+            process: format!("{name} (pid {p}→{q})"),
+        }),
+        _ => None,
+    }
 }
