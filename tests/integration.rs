@@ -135,7 +135,7 @@ fn raw_literal_float_body_verifies() {
         std::str::from_utf8(canon).unwrap()
     );
     let frame: Frame = serde_json::from_str(&line).unwrap();
-    assert_eq!(frame.verify(&prev), false); // Value-path would mis-verify
+    assert!(!frame.verify(&prev)); // Value-path would mis-verify
     assert_eq!(Frame::verify_line(&line, &prev), Some(true)); // byte-path verifies
 }
 
